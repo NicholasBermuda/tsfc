@@ -10,6 +10,9 @@ python:
 env:
   - NUMPY_VERSION="==1.9.0"
   - NUMPY_VERSION=">=1.10"
+  - CVXOPT_BUILD_GLPK="1"
+  - CVXOPT_GLPK_LIB_DIR="$TRAVIS_BUILD_DIR/lib"
+  - CVXOPT_GLPK_INC_DIR="$TRAVIS_BUILD_DIR/include"
 
 matrix:
   exclude:
@@ -19,7 +22,14 @@ matrix:
     env: NUMPY_VERSION=">=1.10"
 
 before_install:
-  - pip install -r requirements.txt
+  - git clone https://github.com/firedrakeproject/glpk.git
+  - cd glpk
+  - echo $TRAVIS_BUILD_DIR
+  - ./configure --prefix=$TRAVIS_BUILD_DIR
+  - make
+  - make install
+  - cd ..
+  - pip install --no-binary cvxopt -r requirements.txt
   - pip install flake8
   - pip install flake8-future-import
   - pip install --upgrade pytest
