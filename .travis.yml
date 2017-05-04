@@ -29,7 +29,7 @@ before_install:
   - make
   - make install
   - cd ..
-  - pip install --no-binary cvxopt -r requirements.txt
+  - pip install -r requirements.txt --no-binary cvxopt
   - pip install flake8
   - pip install flake8-future-import
   - pip install --upgrade pytest
