@@ -130,26 +130,31 @@ def find_optimal_atomics(monomials, argument_indices):
         return tuple(iterkeys(atomic_index))
 
     # set up the ILP
-    import pulp as ilp
-    ilp_prob = ilp.LpProblem('gem factorise', ilp.LpMinimize)
-    ilp_var = ilp.LpVariable.dicts('node', range(len(atomic_index)), 0, 1, ilp.LpBinary)
+    from cvxopt import glpk, matrix
 
     # Objective function
     # Minimise number of factors to pull. If same number, favour factor with larger extent
     penalty = 2 * max(index_extent(atomic, argument_indices) for atomic in atomic_index) * len(atomic_index)
-    ilp_prob += ilp.lpSum(ilp_var[index] * (penalty - index_extent(atomic, argument_indices))
-                          for atomic, index in iteritems(atomic_index))
+    cost = [penalty] * len(atomic_index)
+    for atomic, index in iteritems(atomic_index):
+        cost[index] -= index_extent(atomic, argument_indices)
+    cost = matrix(cost, tc='d')
 
     # constraints
-    for connection in connections:
-        ilp_prob += ilp.lpSum(ilp_var[index] for index in connection) >= 1
+    G = numpy.zeros((len(connections), len(atomic_index)))
+    for (i, connection) in enumerate(connections):
+        G[i, connection] = -1
+    G = matrix(G, tc='d')
+    h = matrix(-1, (len(connections), 1), tc='d')
+    # We minimize c*x subject to G*x <= h
+    glpk.options['msg_lev'] = 'GLP_MSG_OFF'
+    (status, result) = glpk.ilp(cost, G, h, B=set(range(len(atomic_index))))
 
-    ilp_prob.solve()
-    if ilp_prob.status != 1:
+    if status != 'optimal':
         raise RuntimeError("Something bad happened during ILP")
 
     def optimal(atomic):
-        return ilp_var[atomic_index[atomic]].value() == 1
+        return result[atomic_index[atomic]] == 1
 
     return tuple(sorted(filter(optimal, atomic_index), key=atomic_index.get))
 
