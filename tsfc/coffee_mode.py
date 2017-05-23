@@ -46,6 +46,11 @@ def Integrals(expressions, quadrature_multiindex, argument_multiindices, paramet
     expressions = remove_componenttensors(expressions)
     expressions = replace_division(expressions)
     argument_indices = tuple(itertools.chain(*argument_multiindices))
+    try:
+        from firedrake import Citations
+        Citations().register("Luporini2016")
+    except ImportError:
+        pass
     return optimise_expressions(expressions, argument_indices)
 
 
