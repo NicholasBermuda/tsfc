@@ -1,7 +1,31 @@
 from __future__ import absolute_import, print_function, division
 
+import gem
 from gem import index_sum
+from gem.node import Memoizer, reuse_if_untouched
 from gem.optimise import unroll_indexsum
+
+import numpy
+from singledispatch import singledispatch
+
+
+@singledispatch
+def _replace(node, self):
+    raise AssertionError
+
+
+@_replace.register(gem.Node)
+def _replace_node(node, self):
+    if node in self.substitutions:
+        return self.substitutions[node]
+    else:
+        return reuse_if_untouched(node, self)
+
+
+def replace(expression, substitutions):
+    mapper = Memoizer(_replace)
+    mapper.substitutions = substitutions
+    return mapper(expression)
 
 
 def Integrals(expressions, quadrature_multiindex, argument_multiindices, parameters):
@@ -37,8 +61,39 @@ def flatten(var_reps):
     """
     for variable, reps in var_reps:
         expressions = reps  # representations are expressions
+        expressions = gem.optimise.remove_componenttensors(expressions)
         for expression in expressions:
-            yield (variable, expression)
+            argument_indices = expression.free_indices  # ugly
+            nodes = []
+            for node in gem.node.traversal([expression]):  # assume pre_traversal
+                if isinstance(node, gem.Indexed) and isinstance(node.children[0], gem.Concatenate):
+                    index, = node.multiindex
+                    if index in argument_indices and (len(nodes) == 0 or {index} == set(n.multiindex[0] for n in nodes)):
+                        nodes.append(node)
+
+            if nodes:
+                concat_ref, = nodes[0].children
+                index, = nodes[0].multiindex
+                offset = 0
+                for i, child in enumerate(concat_ref.children):
+                    size = numpy.prod(child.shape, dtype=int)
+                    slice_ = slice(offset, offset + size)
+                    multiindex = tuple(gem.Index(extent=d) for d in child.shape)
+
+                    substitutions = {node: gem.Indexed(node.children[0].children[i], multiindex)
+                                     for node in nodes}
+                    expr = replace(expression, substitutions)
+
+                    assert len(variable.free_indices) == 1
+                    data = gem.ComponentTensor(variable, (index,))
+                    var = gem.Indexed(gem.reshape(gem.view(data, slice_), child.shape), multiindex)
+                    var, = gem.optimise.remove_componenttensors([var])
+                    yield (var, expr)
+
+                    offset += size
+            else:
+                # No Concatenate to handle
+                yield (variable, expression)
 
 
 finalise_options = {}
