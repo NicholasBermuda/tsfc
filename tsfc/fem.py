@@ -6,6 +6,7 @@ from six import iterkeys, iteritems, itervalues
 from six.moves import map, range, zip
 
 import collections
+import functools
 import itertools
 
 import numpy
@@ -337,6 +338,62 @@ def translate_argument(terminal, mt, ctx):
     return gem.ComponentTensor(gem.Indexed(table, argument_multiindex + sigma), sigma)
 
 
+def foobar(value):
+    sum_indices, factors = gem.optimise.traverse_product(value)
+    concat_shapes = {}
+    concat_multiindices = {}
+    for node in gem.node.traversal(factors):
+        if isinstance(node, gem.Indexed) and isinstance(node.children[0], gem.Concatenate):
+            index, = node.multiindex
+            if index in sum_indices:
+                assert node in factors
+                concat, = node.children
+                shapes = tuple(e.shape for e in concat.children)
+                concat_shapes.setdefault(index, shapes)
+                assert concat_shapes[index] == shapes
+                if index not in concat_multiindices:
+                    concat_multiindices[index] = tuple(tuple(gem.Index(extent=d) for d in shape) for shape in shapes)
+
+    if not concat_shapes:
+        assert not concat_multiindices
+        yield value
+
+    concat_index = next(iter(concat_shapes))
+    concat_shapes = concat_shapes[concat_index]
+    concat_multiindices = concat_multiindices[concat_index]
+    # return concat_index, concat_shapes, concat_multiindices
+
+    result = []
+    for i in range(len(concat_shapes)):
+        split_factors = []
+        for factor in factors:
+            if concat_index not in factor.free_indices:
+                split_factors.append(factor)
+                continue
+
+            if isinstance(factor, gem.Indexed) and isinstance(factor.children[0], gem.Concatenate):
+                concat, = factor.children
+                index, = factor.multiindex
+                assert index == concat_index
+                split_factors.append(gem.Indexed(concat.children[i], concat_multiindices[i]))
+            elif isinstance(factor, gem.gem.FlexiblyIndexed) and isinstance(factor.children[0], gem.Variable):
+                assert len(factor.free_indices) == 1
+                data = gem.ComponentTensor(factor, (concat_index,))
+                sizes = list(map(functools.partial(numpy.prod, dtype=int), concat_shapes))
+                split_factors.append(gem.Indexed(gem.reshape(gem.view(data, slice(sum(sizes[:i]), sum(sizes[:i+1]))), concat_shapes[i]), concat_multiindices[i]))
+            else:
+                assert False
+
+        split_sum_indices = list(sum_indices)
+        split_sum_indices.remove(concat_index)
+        split_sum_indices.extend(concat_multiindices[i])
+        result.append(gem.IndexSum(reduce(gem.Product, split_factors), tuple(split_sum_indices)))
+    result = gem.optimise.remove_componenttensors(result)
+    for egg in result:
+        for yoke in foobar(egg):
+            yield yoke
+
+
 @translate.register(Coefficient)
 def translate_coefficient(terminal, mt, ctx):
     vec = ctx.coefficient(terminal, mt.restriction)
@@ -378,10 +435,34 @@ def translate_coefficient(terminal, mt, ctx):
     zeta = element.get_value_indices()
     value_dict = {}
     for alpha, table in iteritems(per_derivative):
-        value = gem.IndexSum(gem.Product(gem.Indexed(table, beta + zeta),
-                                         gem.Indexed(vec, beta)),
-                             beta)
-        optimised_value = gem.optimise.contraction(value)
+        table_qr = gem.Indexed(table, beta + zeta)
+        table_qr, = gem.optimise.remove_componenttensors([gem.Indexed(table, beta + zeta)])
+        to_expand = set()
+        for node in traversal([table_qr]):
+            if isinstance(node, gem.Indexed) and isinstance(node.children[0], gem.ListTensor):
+                to_expand |= set(zeta) & set(node.multiindex)
+        if to_expand:
+            to_expand = tuple(index for index in zeta if index in to_expand)
+            table_s = gem.ComponentTensor(table_qr, to_expand)
+            # Unroll expression shape
+            scalars = gem.optimise.remove_componenttensors(
+                gem.Indexed(table_s, mu) for mu in numpy.ndindex(table_s.shape)
+            )
+        else:
+            table_s = table_qr
+            scalars = [table_s]
+
+        blah = []
+        for scalar in scalars:
+            value = gem.IndexSum(gem.Product(scalar,
+                                             gem.Indexed(vec, beta)),
+                                 beta)
+            optimised_value = reduce(gem.Sum, map(gem.optimise.contraction, foobar(value)))
+            blah.append(optimised_value)
+        if to_expand:
+            optimised_value = gem.Indexed(gem.ListTensor(numpy.array(blah).reshape(table_s.shape)), to_expand)
+        else:
+            optimised_value, = blah
         value_dict[alpha] = gem.ComponentTensor(optimised_value, zeta)
 
     # Change from FIAT to UFL arrangement

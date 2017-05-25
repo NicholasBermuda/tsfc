@@ -22,11 +22,13 @@
 # along with FFC. If not, see <http://www.gnu.org/licenses/>.
 
 from __future__ import absolute_import, print_function, division
+from six import iteritems
 
 from singledispatch import singledispatch
 import weakref
 
 import finat
+from finat.finiteelementbase import FiniteElementBase
 from finat.fiat_elements import FiatElementBase
 
 import ufl
@@ -52,6 +54,8 @@ supported_elements = {
     # These require special treatment below
     "DQ": None,
     "Q": None,
+    # "RTCE": None,
+    "RTCF": None,
 }
 """A :class:`.dict` mapping UFL element family names to their
 FInAT-equivalent constructors.  If the value is ``None``, the UFL
@@ -76,6 +80,74 @@ def fiat_compat(element):
     from tsfc.fiatinterface import create_element
     return FiatElementWrapper(create_element(element),
                               degree=spanning_degree(element))
+
+
+class WrapperElement(FiniteElementBase):
+    def __init__(self, wrapped, ks):
+        self.wrapped = wrapped
+        self.ks = ks
+
+    @property
+    def cell(self):
+        return self.wrapped.cell
+
+    @property
+    def degree(self):
+        return self.wrapped.degree
+
+    def entity_dofs(self):
+        return self.wrapped.entity_dofs()
+
+    def entity_closure_dofs(self):
+        return self.wrapped.entity_closure_dofs()
+
+    def space_dimension(self):
+        return self.wrapped.space_dimension()
+
+    @property
+    def index_shape(self):
+        return self.wrapped.index_shape
+
+    @property
+    def value_shape(self):
+        assert self.wrapped.value_shape == ()
+        assert self.cell.get_spatial_dimension() == 2
+        return (2,)
+
+    def basis_evaluation(self, order, ps, entity=None):
+        import gem
+
+        beta = self.get_indices()
+        zeta = self.get_value_indices()
+
+        def vector(table):
+            if self.ks == (0, 1):
+                return gem.ComponentTensor(
+                    gem.Indexed(
+                        gem.ListTensor([
+                            gem.Product(gem.Literal(-1), gem.Indexed(table, beta)),
+                            gem.Zero(),
+                        ]),
+                        zeta
+                    ),
+                    beta + zeta
+                )
+            elif self.ks == (1, 0):
+                return gem.ComponentTensor(
+                    gem.Indexed(
+                        gem.ListTensor([gem.Zero(), gem.Indexed(table, beta)]),
+                        zeta
+                    ),
+                    beta + zeta
+                )
+            else:
+                assert False
+        core_eval = self.wrapped.basis_evaluation(order, ps, entity)
+        return {alpha: vector(table)
+                for alpha, table in iteritems(core_eval)}
+
+    def point_evaluation(self, order, refcoords, entity=None):
+        raise NotImplementedError
 
 
 @singledispatch
@@ -135,6 +207,11 @@ def convert_finiteelement(element):
     return lmbda(cell, element.degree())
 
 
+@convert.register(ufl.EnrichedElement)
+def convert_enrichedelement(element):
+    return finat.EnrichedElement([create_element(elem) for elem in element._elements])
+
+
 # VectorElement case
 @convert.register(ufl.VectorElement)
 def convert_vectorelement(element):
@@ -157,6 +234,17 @@ def convert_tensorproductelement(element):
         raise ValueError("TensorProductElement not on TensorProductCell?")
     return finat.TensorProductElement([create_element(elem)
                                        for elem in element.sub_elements()])
+
+
+@convert.register(ufl.HDivElement)
+def convert_hdivelement(element):
+    from tsfc.fiatinterface import create_element as create_fiat_element
+    if element.cell().topological_dimension() == 2:
+        ks = tuple(create_fiat_element(ufl_elem).get_formdegree()
+                   for ufl_elem in element._element.sub_elements())
+        return WrapperElement(create_element(element._element), ks)
+    else:
+        return fiat_compat(element)
 
 
 quad_tpc = ufl.TensorProductCell(ufl.interval, ufl.interval)

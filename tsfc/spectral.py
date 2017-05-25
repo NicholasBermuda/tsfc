@@ -4,7 +4,7 @@ from six.moves import map, zip
 from functools import partial
 from itertools import chain
 
-from gem import index_sum
+from gem import Delta, Indexed, index_sum
 from gem.optimise import delta_elimination as _delta_elimination
 from gem.optimise import sum_factorise as _sum_factorise
 from gem.optimise import unroll_indexsum
@@ -52,7 +52,10 @@ def flatten(var_reps):
         if n == 0:
             return OTHER
         elif n == 1:
-            return ATOMIC
+            if isinstance(expression, (Delta, Indexed)):
+                return ATOMIC
+            else:
+                return COMPOUND
         else:
             return COMPOUND
 
