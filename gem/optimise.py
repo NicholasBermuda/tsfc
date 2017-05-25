@@ -6,18 +6,19 @@ from six.moves import filter, map, zip
 
 from collections import defaultdict
 from functools import partial, reduce
-from itertools import combinations, permutations
+from itertools import chain, combinations, permutations
 
 import numpy
 from singledispatch import singledispatch
 
 from gem.utils import groupby
-from gem.node import Memoizer, MemoizerArg, reuse_if_untouched, reuse_if_untouched_arg
-from gem.gem import (Node, Terminal, Failure, Identity, Literal, Zero,
-                     Product, Sum, Comparison, Conditional, Division,
-                     Index, VariableIndex, Indexed, FlexiblyIndexed,
-                     IndexSum, ComponentTensor, ListTensor, Delta,
-                     partial_indexed, one)
+from gem.node import Memoizer, MemoizerArg, traversal, reuse_if_untouched, reuse_if_untouched_arg
+from gem.gem import (Node, Terminal, Failure, Identity, Literal,
+                     Variable, Zero, Product, Sum, Comparison,
+                     Conditional, Division, Index, VariableIndex,
+                     Indexed, FlexiblyIndexed, IndexSum,
+                     ComponentTensor, ListTensor, Concatenate, Delta,
+                     partial_indexed, reshape, view, one)
 
 
 @singledispatch
@@ -468,6 +469,64 @@ def traverse_sum(expression, stop_at=None):
         else:
             result.append(expr)
     return result
+
+
+def unconcatenate(expression):
+    # Eliminate annoying ComponentTensors
+    expression, = remove_componenttensors([expression])
+
+    sum_indices, factors = traverse_product(expression)
+    for f in factors:
+        if isinstance(f, Indexed) and isinstance(f.children[0], Concatenate):
+            index, = f.multiindex
+            if index in sum_indices:
+                break
+    else:
+        # No Concatenate to handle
+        if any(isinstance(node, Concatenate) for node in traversal(factors)):
+            raise RuntimeError("Concatenate node cannot be split in {}".format(expression))
+
+        # Nothing left to do
+        return iter((expression,))
+
+    # 'f' is an indexed Concatenate factor, 'index' is its index
+    concat_ref, = f.children
+
+    split_expressions = []
+    offset = 0
+    for i, child in enumerate(concat_ref.children):
+        size = numpy.prod(child.shape, dtype=int)
+        slice_ = slice(offset, offset + size)
+        multiindex = tuple(Index(extent=d) for d in child.shape)
+
+        split_factors = []
+        for f in factors:
+            if index not in f.free_indices:
+                split_factors.append(f)
+                continue
+
+            if isinstance(f, Indexed) and isinstance(f.children[0], Concatenate):
+                assert f.multiindex == (index,)
+                concat, = f.children
+                split_factors.append(Indexed(concat.children[i], multiindex))
+            elif isinstance(f, FlexiblyIndexed) and isinstance(f.children[0], Variable):
+                assert len(f.free_indices) == 1
+                data = ComponentTensor(f, (index,))
+                split_factors.append(Indexed(reshape(view(data, slice_), child.shape), multiindex))
+            else:
+                assert False
+
+        split_sum_indices = list(sum_indices)
+        split_sum_indices.remove(index)
+        split_sum_indices.extend(multiindex)
+
+        split_expressions.append(
+            IndexSum(reduce(Product, split_factors), tuple(split_sum_indices))
+        )
+
+        offset += size
+
+    return chain.from_iterable(map(unconcatenate, split_expressions))
 
 
 def contraction(expression):
