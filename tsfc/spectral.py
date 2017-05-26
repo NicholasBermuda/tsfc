@@ -1,9 +1,13 @@
 from __future__ import absolute_import, print_function, division
 from six.moves import map, zip
 
+from collections import OrderedDict
 from functools import partial
 from itertools import chain
 
+import numpy
+
+import gem
 from gem import Delta, Indexed, index_sum
 from gem.optimise import delta_elimination as _delta_elimination
 from gem.optimise import sum_factorise as _sum_factorise
@@ -67,14 +71,89 @@ def flatten(var_reps):
         # Argument factorise
         classifier = partial(classify, argument_indices)
         for monomial_sum in collect_monomials(expressions, classifier):
-            # Compact MonomialSum after IndexSum-Delta cancellation
-            delta_simplified = MonomialSum()
-            for monomial in monomial_sum:
-                delta_simplified.add(*delta_elimination(*monomial))
+            foo = OrderedDict()
 
-            # Yield assignments
-            for monomial in delta_simplified:
-                yield (variable, sum_factorise(*monomial))
+            for monomial in monomial_sum:
+                for v, s, a, r in unconcatenate(variable, *monomial):
+                    foo.setdefault(v, []).append((s, a, r))
+
+            for var, monomial_list in foo.items():
+                # Compact MonomialSum after IndexSum-Delta cancellation
+                delta_simplified = MonomialSum()
+                for monomial in monomial_list:
+                    delta_simplified.add(*delta_elimination(*monomial))
+
+                # Yield assignments
+                for monomial in delta_simplified:
+                    yield (var, sum_factorise(*monomial))
 
 
 finalise_options = {}
+
+
+def unconcatenate(variable, sum_indices, args, rest):
+    # # Eliminate annoying ComponentTensors
+    # expression, = remove_componenttensors([expression])
+
+    for arg in args:
+        if isinstance(arg, gem.Indexed) and isinstance(arg.children[0], gem.Concatenate):
+            index, = arg.multiindex
+            if index not in sum_indices:
+                break
+    else:
+        # No Concatenate to handle
+        if any(isinstance(node, gem.Concatenate) for node in gem.node.traversal(args + (rest,))):
+            raise RuntimeError("Concatenate node cannot be split")
+
+        # Nothing left to do
+        return iter(((variable, sum_indices, args, rest),))
+
+    # 'arg' is an indexed Concatenate factor, 'index' is its index
+    concat_ref, = arg.children
+
+    split_assignments = []
+    offset = 0
+    for i, child in enumerate(concat_ref.children):
+        size = numpy.prod(child.shape, dtype=int)
+        slice_ = slice(offset, offset + size)
+        multiindex = tuple(gem.Index(extent=d) for d in child.shape)
+
+        split_args = []
+        for arg in args:
+            if index not in arg.free_indices:
+                split_args.append(args)
+                continue
+
+            if isinstance(arg, gem.Indexed) and isinstance(arg.children[0], gem.Concatenate):
+                assert arg.multiindex == (index,)
+                concat, = arg.children
+                section = gem.Indexed(concat.children[i], multiindex)
+                section, = gem.optimise.remove_componenttensors([section])
+                si, factors = gem.optimise.traverse_product(section)
+                assert not si
+                split_args.extend(factors)
+            # elif isinstance(f, FlexiblyIndexed) and isinstance(f.children[0], Variable):
+            #     assert len(f.free_indices) == 1
+            #     data = ComponentTensor(f, (index,))
+            #     split_factors.append(Indexed(reshape(view(data, slice_), child.shape), multiindex))
+            else:
+                assert False
+
+        # split_sum_indices = list(sum_indices)
+        # split_sum_indices.remove(index)
+        # split_sum_indices.extend(multiindex)
+
+        assert index not in rest.free_indices
+
+        assert isinstance(variable, gem.gem.FlexiblyIndexed) and isinstance(variable.children[0], gem.Variable)
+        assert len(variable.free_indices) == 1
+        data = gem.ComponentTensor(variable, (index,))
+
+        split_variable = gem.Indexed(gem.reshape(gem.view(data, slice_), child.shape), multiindex)
+        split_variable, = gem.optimise.remove_componenttensors([split_variable])
+
+        split_assignments.append((split_variable, sum_indices, tuple(split_args), rest))
+
+        offset += size
+
+    return chain.from_iterable(unconcatenate(*assignment) for assignment in split_assignments)
