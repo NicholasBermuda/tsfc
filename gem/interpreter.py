@@ -136,7 +136,8 @@ def _(e, self):
         result[idx] = op(a[a.filter(idx, fids)], b[b.filter(idx, fids)])
     return result
 
-@_evaluate.register(gem.Conj)  # noqa: F811 # i don't know what this is for?
+
+@_evaluate.register(gem.Conj)  # noqa: F811
 def _(e, self):
     ops = [self(o) for o in e.children]
 
