@@ -211,7 +211,8 @@ def compile_integral(integral_data, form_data, prefix, parameters,
             index_names.append((quadrature_index, 'ip_%d' % i))
 
     # Construct kernel
-    body = generate_coffee(impero_c, index_names, parameters["precision"], expressions, argument_indices)
+    body = generate_coffee(impero_c, index_names, parameters["precision"], 
+                            parameters["scalar_type"], expressions, argument_indices)
 
     return builder.construct_kernel(kernel_name, body)
 
