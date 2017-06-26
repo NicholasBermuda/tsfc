@@ -137,6 +137,16 @@ def _(e, self):
     return result
 
 
+@_evaluate.register(gem.Conj)  # noqa: F811
+def _(e, self):
+    ops = [self(o) for o in e.children]
+
+    result = Result.empty(*ops)
+    for idx in numpy.ndindex(result.tshape):
+        result[idx] = [o[o.filter(idx,result.fids)].conjugate() for o in ops]
+    return result
+
+
 @_evaluate.register(gem.Real)  # noqa: F811
 def _(e, self):
     ops = [self(o) for o in e.children]
@@ -162,8 +172,7 @@ def _(e, self):
     ops = [self(o) for o in e.children]
     result = Result.empty(*ops)
     names = {"abs": abs,
-             "log": math.log,
-             "conj": complex.conjugate}
+             "log": math.log}
     op = names[e.name]
     for idx in numpy.ndindex(result.tshape):
         result[idx] = op(*(o[o.filter(idx, result.fids)] for o in ops))
